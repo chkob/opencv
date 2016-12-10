@@ -41,8 +41,8 @@
 //
 //M*/
 
-#ifndef __OPENCV_CORE_PERSISTENCE_HPP__
-#define __OPENCV_CORE_PERSISTENCE_HPP__
+#ifndef OPENCV_CORE_PERSISTENCE_HPP
+#define OPENCV_CORE_PERSISTENCE_HPP
 
 #ifndef __cplusplus
 #  error persistence.hpp header must be compiled as C++
@@ -958,7 +958,6 @@ void write( FileStorage& fs, const std::vector<_Tp>& vec )
     w(vec);
 }
 
-
 template<typename _Tp> static inline
 void write(FileStorage& fs, const String& name, const Point_<_Tp>& pt )
 {
@@ -1020,6 +1019,17 @@ void write( FileStorage& fs, const String& name, const std::vector<_Tp>& vec )
 {
     cv::internal::WriteStructContext ws(fs, name, FileNode::SEQ+(DataType<_Tp>::fmt != 0 ? FileNode::FLOW : 0));
     write(fs, vec);
+}
+
+template<typename _Tp> static inline
+void write( FileStorage& fs, const String& name, const std::vector< std::vector<_Tp> >& vec )
+{
+    cv::internal::WriteStructContext ws(fs, name, FileNode::SEQ);
+    for(size_t i = 0; i < vec.size(); i++)
+    {
+        cv::internal::WriteStructContext ws_(fs, name, FileNode::SEQ+(DataType<_Tp>::fmt != 0 ? FileNode::FLOW : 0));
+        write(fs, vec[i]);
+    }
 }
 
 //! @} FileStorage
@@ -1261,4 +1271,4 @@ CV_EXPORTS void cvWriteMatND_Base64(::CvFileStorage* fs, const char* name, const
 
 } // cv
 
-#endif // __OPENCV_CORE_PERSISTENCE_HPP__
+#endif // OPENCV_CORE_PERSISTENCE_HPP

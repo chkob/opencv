@@ -47,6 +47,12 @@
 
 #include "opencl_kernels_core.hpp"
 
+#ifdef HAVE_OPENVX
+#define IVX_HIDE_INFO_WARNINGS
+#define IVX_USE_OPENCV
+#include "ivx.hpp"
+#endif
+
 namespace cv
 {
 
@@ -1597,7 +1603,7 @@ static bool ocl_meanStdDev( InputArray _src, OutputArray _mean, OutputArray _sdv
 
         size_t globalsize = groups * wgs;
 
-        if(!CV_INSTRUMENT_FUN_OPENCL_KERNEL(k.run, 1, &globalsize, &wgs, false))
+        if(!k.run(1, &globalsize, &wgs, false))
             return false;
 
         typedef Scalar (* part_sum)(Mat m);
@@ -1646,6 +1652,75 @@ static bool ocl_meanStdDev( InputArray _src, OutputArray _mean, OutputArray _sdv
 
 }
 
+#endif
+
+#ifdef HAVE_OPENVX
+namespace cv
+{
+    static bool openvx_meanStdDev(Mat& src, OutputArray _mean, OutputArray _sdv, Mat& mask)
+    {
+        size_t total_size = src.total();
+        int rows = src.size[0], cols = rows ? (int)(total_size / rows) : 0;
+        if (src.type() != CV_8UC1|| !mask.empty() ||
+               (src.dims != 2 && !(src.isContinuous() && cols > 0 && (size_t)rows*cols == total_size))
+           )
+        return false;
+
+        try
+        {
+            ivx::Context ctx = ivx::Context::create();
+#ifndef VX_VERSION_1_1
+            if (ctx.vendorID() == VX_ID_KHRONOS)
+                return false; // Do not use OpenVX meanStdDev estimation for sample 1.0.1 implementation due to lack of accuracy
+#endif
+
+            ivx::Image
+                ia = ivx::Image::createFromHandle(ctx, VX_DF_IMAGE_U8,
+                    ivx::Image::createAddressing(cols, rows, 1, (vx_int32)(src.step[0])), src.ptr());
+
+            vx_float32 mean_temp, stddev_temp;
+            ivx::IVX_CHECK_STATUS(vxuMeanStdDev(ctx, ia, &mean_temp, &stddev_temp));
+
+            if (_mean.needed())
+            {
+                if (!_mean.fixedSize())
+                    _mean.create(1, 1, CV_64F, -1, true);
+                Mat mean = _mean.getMat();
+                CV_Assert(mean.type() == CV_64F && mean.isContinuous() &&
+                    (mean.cols == 1 || mean.rows == 1) && mean.total() >= 1);
+                double *pmean = mean.ptr<double>();
+                pmean[0] = mean_temp;
+                for (int c = 1; c < (int)mean.total(); c++)
+                    pmean[c] = 0;
+            }
+
+            if (_sdv.needed())
+            {
+                if (!_sdv.fixedSize())
+                    _sdv.create(1, 1, CV_64F, -1, true);
+                Mat stddev = _sdv.getMat();
+                CV_Assert(stddev.type() == CV_64F && stddev.isContinuous() &&
+                    (stddev.cols == 1 || stddev.rows == 1) && stddev.total() >= 1);
+                double *pstddev = stddev.ptr<double>();
+                pstddev[0] = stddev_temp;
+                for (int c = 1; c < (int)stddev.total(); c++)
+                    pstddev[c] = 0;
+            }
+
+            return true;
+        }
+        catch (ivx::RuntimeError & e)
+        {
+            CV_Error(CV_StsInternal, e.what());
+            return false;
+        }
+        catch (ivx::WrapperError & e)
+        {
+            CV_Error(CV_StsInternal, e.what());
+            return false;
+        }
+    }
+}
 #endif
 
 #ifdef HAVE_IPP
@@ -1772,6 +1847,11 @@ void cv::meanStdDev( InputArray _src, OutputArray _mean, OutputArray _sdv, Input
 
     Mat src = _src.getMat(), mask = _mask.getMat();
     CV_Assert( mask.empty() || mask.type() == CV_8UC1 );
+
+#ifdef HAVE_OPENVX
+    if (openvx_meanStdDev(src, _mean, _sdv, mask))
+        return;
+#endif
 
     CV_IPP_RUN(IPP_VERSION_X100 >= 700, ipp_meanStdDev(src, _mean, _sdv, mask));
 
@@ -2226,6 +2306,81 @@ static bool ocl_minMaxIdx( InputArray _src, double* minVal, double* maxVal, int*
 
 #endif
 
+#ifdef HAVE_OPENVX
+static bool openvx_minMaxIdx(Mat &src, double* minVal, double* maxVal, int* minIdx, int* maxIdx, Mat &mask)
+{
+    int stype = src.type();
+    size_t total_size = src.total();
+    int rows = src.size[0], cols = rows ? (int)(total_size / rows) : 0;
+    if ((stype != CV_8UC1 && stype != CV_16SC1) || !mask.empty() ||
+        (src.dims != 2 && !(src.isContinuous() && cols > 0 && (size_t)rows*cols == total_size))
+        )
+        return false;
+
+    try
+    {
+        ivx::Context ctx = ivx::Context::create();
+        ivx::Image
+            ia = ivx::Image::createFromHandle(ctx, stype == CV_8UC1 ? VX_DF_IMAGE_U8 : VX_DF_IMAGE_S16,
+                ivx::Image::createAddressing(cols, rows, stype == CV_8UC1 ? 1 : 2, (vx_int32)(src.step[0])), src.ptr());
+
+        ivx::Scalar vxMinVal = ivx::Scalar::create(ctx, stype == CV_8UC1 ? VX_TYPE_UINT8 : VX_TYPE_INT16, 0);
+        ivx::Scalar vxMaxVal = ivx::Scalar::create(ctx, stype == CV_8UC1 ? VX_TYPE_UINT8 : VX_TYPE_INT16, 0);
+        ivx::Array vxMinInd, vxMaxInd;
+        ivx::Scalar vxMinCount, vxMaxCount;
+        if (minIdx)
+        {
+            vxMinInd = ivx::Array::create(ctx, VX_TYPE_COORDINATES2D, 1);
+            vxMinCount = ivx::Scalar::create(ctx, VX_TYPE_UINT32, 0);
+        }
+        if (maxIdx)
+        {
+            vxMaxInd = ivx::Array::create(ctx, VX_TYPE_COORDINATES2D, 1);
+            vxMaxCount = ivx::Scalar::create(ctx, VX_TYPE_UINT32, 0);
+        }
+
+        ivx::IVX_CHECK_STATUS(vxuMinMaxLoc(ctx, ia, vxMinVal, vxMaxVal, vxMinInd, vxMaxInd, vxMinCount, vxMaxCount));
+
+        if (minVal)
+        {
+            *minVal = stype == CV_8UC1 ? vxMinVal.getValue<vx_uint8>() : vxMinVal.getValue<vx_int16>();
+        }
+        if (maxVal)
+        {
+            *maxVal = stype == CV_8UC1 ? vxMaxVal.getValue<vx_uint8>() : vxMaxVal.getValue<vx_int16>();
+        }
+        if (minIdx)
+        {
+            if(vxMinCount.getValue<vx_uint32>()<1) throw ivx::RuntimeError(VX_ERROR_INVALID_VALUE, std::string(__func__) + "(): minimum value location not found");
+            vx_coordinates2d_t loc;
+            vxMinInd.copyRangeTo(0, 1, &loc);
+            size_t minidx = loc.y * cols + loc.x + 1;
+            ofs2idx(src, minidx, minIdx);
+        }
+        if (maxIdx)
+        {
+            if (vxMaxCount.getValue<vx_uint32>()<1) throw ivx::RuntimeError(VX_ERROR_INVALID_VALUE, std::string(__func__) + "(): maximum value location not found");
+            vx_coordinates2d_t loc;
+            vxMaxInd.copyRangeTo(0, 1, &loc);
+            size_t maxidx = loc.y * cols + loc.x + 1;
+            ofs2idx(src, maxidx, maxIdx);
+        }
+
+        return true;
+    }
+    catch (ivx::RuntimeError & e)
+    {
+        CV_Error(CV_StsInternal, e.what());
+        return false;
+    }
+    catch (ivx::WrapperError & e)
+    {
+        CV_Error(CV_StsInternal, e.what());
+        return false;
+    }
+}
+#endif
+
 #ifdef HAVE_IPP
 static bool ipp_minMaxIdx( Mat &src, double* minVal, double* maxVal, int* minIdx, int* maxIdx, Mat &mask)
 {
@@ -2349,6 +2504,12 @@ void cv::minMaxIdx(InputArray _src, double* minVal,
                ocl_minMaxIdx(_src, minVal, maxVal, minIdx, maxIdx, _mask))
 
     Mat src = _src.getMat(), mask = _mask.getMat();
+
+#ifdef HAVE_OPENVX
+    if (openvx_minMaxIdx(src, minVal, maxVal, minIdx, maxIdx, mask))
+        return;
+#endif
+
     CV_IPP_RUN(IPP_VERSION_X100 >= 700, ipp_minMaxIdx(src, minVal, maxVal, minIdx, maxIdx, mask))
 
     MinMaxIdxFunc func = getMinmaxTab(depth);
@@ -4075,6 +4236,16 @@ static const uchar popCountTable4[] =
     1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2
 };
 
+#if CV_AVX2
+static inline int _mm256_extract_epi32_(__m256i reg, const int i)
+{
+    CV_DECL_ALIGNED(32) int reg_data[8];
+    CV_DbgAssert(0 <= i && i < 8);
+    _mm256_store_si256((__m256i*)reg_data, reg);
+    return reg_data[i];
+}
+#endif
+
 int normHamming(const uchar* a, int n)
 {
     int i = 0;
@@ -4092,6 +4263,27 @@ int normHamming(const uchar* a, int n)
         uint64x2_t bitSet2 = vpaddlq_u32 (bits);
         result = vgetq_lane_s32 (vreinterpretq_s32_u64(bitSet2),0);
         result += vgetq_lane_s32 (vreinterpretq_s32_u64(bitSet2),2);
+    }
+#elif CV_AVX2
+    {
+        __m256i _r0 = _mm256_setzero_si256();
+        __m256i _0 = _mm256_setzero_si256();
+        __m256i _popcnt_table = _mm256_setr_epi8(0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4,
+                                                 0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4);
+        __m256i _popcnt_mask = _mm256_set1_epi8(0x0F);
+
+        for(; i <= n - 32; i+= 32)
+        {
+            __m256i _a0 = _mm256_loadu_si256((const __m256i*)(a + i));
+
+            __m256i _popc0 = _mm256_shuffle_epi8(_popcnt_table, _mm256_and_si256(_a0, _popcnt_mask));
+            __m256i _popc1 = _mm256_shuffle_epi8(_popcnt_table,
+                             _mm256_and_si256(_mm256_srli_epi16(_a0, 4), _popcnt_mask));
+
+            _r0 = _mm256_add_epi32(_r0, _mm256_sad_epu8(_0, _mm256_add_epi8(_popc0, _popc1)));
+        }
+        _r0 = _mm256_add_epi32(_r0, _mm256_shuffle_epi32(_r0, 2));
+        result = _mm256_extract_epi32_(_mm256_add_epi32(_r0, _mm256_permute2x128_si256(_r0, _r0, 1)), 0);
     }
 #endif
         for( ; i <= n - 4; i += 4 )
@@ -4121,6 +4313,30 @@ int normHamming(const uchar* a, const uchar* b, int n)
         uint64x2_t bitSet2 = vpaddlq_u32 (bits);
         result = vgetq_lane_s32 (vreinterpretq_s32_u64(bitSet2),0);
         result += vgetq_lane_s32 (vreinterpretq_s32_u64(bitSet2),2);
+    }
+#elif CV_AVX2
+    {
+        __m256i _r0 = _mm256_setzero_si256();
+        __m256i _0 = _mm256_setzero_si256();
+        __m256i _popcnt_table = _mm256_setr_epi8(0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4,
+                                                 0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4);
+        __m256i _popcnt_mask = _mm256_set1_epi8(0x0F);
+
+        for(; i <= n - 32; i+= 32)
+        {
+            __m256i _a0 = _mm256_loadu_si256((const __m256i*)(a + i));
+            __m256i _b0 = _mm256_loadu_si256((const __m256i*)(b + i));
+
+            __m256i _xor = _mm256_xor_si256(_a0, _b0);
+
+            __m256i _popc0 = _mm256_shuffle_epi8(_popcnt_table, _mm256_and_si256(_xor, _popcnt_mask));
+            __m256i _popc1 = _mm256_shuffle_epi8(_popcnt_table,
+                             _mm256_and_si256(_mm256_srli_epi16(_xor, 4), _popcnt_mask));
+
+            _r0 = _mm256_add_epi32(_r0, _mm256_sad_epu8(_0, _mm256_add_epi8(_popc0, _popc1)));
+        }
+        _r0 = _mm256_add_epi32(_r0, _mm256_shuffle_epi32(_r0, 2));
+        result = _mm256_extract_epi32_(_mm256_add_epi32(_r0, _mm256_permute2x128_si256(_r0, _r0, 1)), 0);
     }
 #endif
         for( ; i <= n - 4; i += 4 )

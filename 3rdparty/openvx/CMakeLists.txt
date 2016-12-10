@@ -1,7 +1,8 @@
-add_library(openvx_hal STATIC src/openvx_hal.cpp)
+add_library(openvx_hal STATIC src/openvx_hal.cpp include/openvx_hal.hpp include/ivx.hpp include/ivx_lib_debug.hpp)
 target_include_directories(openvx_hal PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${CMAKE_SOURCE_DIR}/modules/core/include
+  ${CMAKE_SOURCE_DIR}/modules/imgproc/include
   ${OPENVX_INCLUDE_DIR})
 target_link_libraries(openvx_hal LINK_PUBLIC ${OPENVX_LIBRARIES})
 set_target_properties(openvx_hal PROPERTIES POSITION_INDEPENDENT_CODE TRUE)

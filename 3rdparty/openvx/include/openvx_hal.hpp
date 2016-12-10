@@ -2,6 +2,7 @@
 #define OPENCV_OPENVX_HAL_HPP_INCLUDED
 
 #include "opencv2/core/hal/interface.h"
+#include "opencv2/imgproc/hal/interface.h"
 
 #include "VX/vx.h"
 #include "VX/vxu.h"
@@ -10,7 +11,28 @@
 #include <vector>
 
 #include <algorithm>
-#include <opencv2/core/saturate.hpp>
+#include <cfloat>
+#include <climits>
+#include <cmath>
+
+#ifndef VX_VENDOR_ID
+#define VX_VENDOR_ID VX_ID_DEFAULT
+#endif
+
+#if VX_VERSION == VX_VERSION_1_0
+
+static const vx_enum VX_MEMORY_TYPE_HOST = VX_IMPORT_TYPE_HOST;
+static const vx_enum VX_INTERPOLATION_BILINEAR = VX_INTERPOLATION_TYPE_BILINEAR;
+static const vx_enum VX_INTERPOLATION_AREA = VX_INTERPOLATION_TYPE_AREA;
+static const vx_enum VX_INTERPOLATION_NEAREST_NEIGHBOR = VX_INTERPOLATION_TYPE_NEAREST_NEIGHBOR;
+static const vx_enum VX_IMAGE_RANGE = VX_IMAGE_ATTRIBUTE_RANGE;
+static const vx_enum VX_IMAGE_SPACE = VX_IMAGE_ATTRIBUTE_SPACE;
+typedef vx_border_mode_t vx_border_t;
+static const vx_enum VX_BORDER_CONSTANT = VX_BORDER_MODE_CONSTANT;
+static const vx_enum VX_BORDER_REPLICATE = VX_BORDER_MODE_REPLICATE;
+static const vx_enum VX_CONTEXT_IMMEDIATE_BORDER = VX_CONTEXT_ATTRIBUTE_IMMEDIATE_BORDER_MODE;
+
+#endif
 
 //==================================================================================================
 // utility
@@ -47,6 +69,17 @@ struct Tick
     }
 };
 #endif
+
+inline bool dimTooBig(int size)
+{
+    if (VX_VENDOR_ID == VX_ID_KHRONOS || VX_VENDOR_ID == VX_ID_DEFAULT)
+    {
+        //OpenVX use uint32_t for image addressing
+        return ((unsigned)size > (UINT_MAX / VX_SCALE_UNITY));
+    }
+    else
+        return false;
+}
 
 //==================================================================================================
 // One more OpenVX C++ binding :-)
@@ -85,6 +118,24 @@ struct VX_Traits<short>
     enum {
         ImgType = VX_DF_IMAGE_S16,
         DataType = VX_TYPE_INT16
+    };
+};
+
+template <>
+struct VX_Traits<uint>
+{
+    enum {
+        ImgType = VX_DF_IMAGE_U32,
+        DataType = VX_TYPE_UINT32
+    };
+};
+
+template <>
+struct VX_Traits<int>
+{
+    enum {
+        ImgType = VX_DF_IMAGE_S32,
+        DataType = VX_TYPE_INT32
     };
 };
 
@@ -171,18 +222,39 @@ struct vxImage
         addr.dim_y = h;
         addr.stride_x = sizeof(T);
         addr.stride_y = (vx_int32)step;
-        addr.scale_x = VX_SCALE_UNITY;
-        addr.scale_y = VX_SCALE_UNITY;
-        addr.step_x = 1;
-        addr.step_y = 1;
         void *ptrs[] = { (void*)data };
         img = vxCreateImageFromHandle(ctx.ctx, VX_Traits<T>::ImgType, &addr, ptrs, VX_MEMORY_TYPE_HOST);
         vxErr::check(img);
+        swapMemory = true;
+    }
+    template <typename T>
+    vxImage(vxContext &ctx, T value, int w, int h)
+    {
+#if VX_VERSION > VX_VERSION_1_0
+        vx_pixel_value_t pixel;
+        switch ((int)(VX_Traits<T>::DataType))
+        {
+        case VX_TYPE_UINT8:pixel.U8 = value; break;
+        case VX_TYPE_UINT16:pixel.U16 = value; break;
+        case VX_TYPE_INT16:pixel.S16 = value; break;
+        default:vxErr(VX_ERROR_INVALID_PARAMETERS, "uniform image creation").check();
+        }
+        img = vxCreateUniformImage(ctx.ctx, w, h, VX_Traits<T>::ImgType, &pixel);
+#else
+        img = vxCreateUniformImage(ctx.ctx, w, h, VX_Traits<T>::ImgType, &value);
+#endif
+        vxErr::check(img);
+        swapMemory = false;
     }
     vxImage(vxContext &ctx, int imgType, const uchar *data, size_t step, int w, int h)
     {
         if (h == 1)
-            step = w;
+            step = w * ((imgType == VX_DF_IMAGE_RGBX ||
+                         imgType == VX_DF_IMAGE_U32 || imgType == VX_DF_IMAGE_S32) ? 4 :
+                         imgType == VX_DF_IMAGE_RGB ? 3 :
+                        (imgType == VX_DF_IMAGE_U16 || imgType == VX_DF_IMAGE_S16 ||
+                         imgType == VX_DF_IMAGE_UYVY || imgType == VX_DF_IMAGE_YUYV) ? 2 : 1);
+
         vx_imagepatch_addressing_t addr[4];
         void *ptrs[4];
         switch (imgType)
@@ -200,12 +272,9 @@ struct vxImage
             addr[0].dim_y = h;
             addr[0].stride_x = imgType == VX_DF_IMAGE_U8 ? 1 :
                 imgType == VX_DF_IMAGE_RGB ? 3 :
-                (imgType == VX_DF_IMAGE_U16 || imgType == VX_DF_IMAGE_S16) ? 2 : 4;
+                (imgType == VX_DF_IMAGE_U16 || imgType == VX_DF_IMAGE_S16 ||
+                 imgType == VX_DF_IMAGE_UYVY || imgType == VX_DF_IMAGE_YUYV) ? 2 : 4;
             addr[0].stride_y = (vx_int32)step;
-            addr[0].scale_x = VX_SCALE_UNITY;
-            addr[0].scale_y = VX_SCALE_UNITY;
-            addr[0].step_x = (imgType == VX_DF_IMAGE_UYVY || imgType == VX_DF_IMAGE_YUYV) ? 2 : 1;
-            addr[0].step_y = 1;
             ptrs[0] = (void*)data;
             break;
         case VX_DF_IMAGE_NV12:
@@ -214,19 +283,11 @@ struct vxImage
             addr[0].dim_y = h;
             addr[0].stride_x = 1;
             addr[0].stride_y = (vx_int32)step;
-            addr[0].scale_x = VX_SCALE_UNITY;
-            addr[0].scale_y = VX_SCALE_UNITY;
-            addr[0].step_x = 1;
-            addr[0].step_y = 1;
             ptrs[0] = (void*)data;
-            addr[1].dim_x = (w + 1) / 2;
-            addr[1].dim_y = (h + 1) / 2;
+            addr[1].dim_x = w / 2;
+            addr[1].dim_y = h / 2;
             addr[1].stride_x = 2;
             addr[1].stride_y = (vx_int32)step;
-            addr[1].scale_x = VX_SCALE_UNITY;
-            addr[1].scale_y = VX_SCALE_UNITY;
-            addr[1].step_x = 2;
-            addr[1].step_y = 2;
             ptrs[1] = (void*)(data + h * step);
             break;
         case VX_DF_IMAGE_IYUV:
@@ -235,41 +296,37 @@ struct vxImage
             addr[0].dim_y = h;
             addr[0].stride_x = 1;
             addr[0].stride_y = (vx_int32)step;
-            addr[0].scale_x = VX_SCALE_UNITY;
-            addr[0].scale_y = VX_SCALE_UNITY;
-            addr[0].step_x = 1;
-            addr[0].step_y = 1;
             ptrs[0] = (void*)data;
-            addr[1].dim_x = imgType == VX_DF_IMAGE_YUV4 ? w : (w + 1) / 2;
-            addr[1].dim_y = imgType == VX_DF_IMAGE_YUV4 ? h : (h + 1) / 2;
+            addr[1].dim_x = imgType == VX_DF_IMAGE_YUV4 ? w : w / 2;
+            addr[1].dim_y = imgType == VX_DF_IMAGE_YUV4 ? h : h / 2;
+            if (addr[1].dim_x != (step - addr[1].dim_x))
+                vxErr(VX_ERROR_INVALID_PARAMETERS, "UV planes use variable stride").check();
             addr[1].stride_x = 1;
-            addr[1].stride_y = (vx_int32)step;
-            addr[1].scale_x = VX_SCALE_UNITY;
-            addr[1].scale_y = VX_SCALE_UNITY;
-            addr[1].step_x = imgType == VX_DF_IMAGE_YUV4 ? 1 : 2;
-            addr[1].step_y = imgType == VX_DF_IMAGE_YUV4 ? 1 : 2;
+            addr[1].stride_y = (vx_int32)addr[1].dim_x;
             ptrs[1] = (void*)(data + h * step);
             addr[2].dim_x = addr[1].dim_x;
             addr[2].dim_y = addr[1].dim_y;
             addr[2].stride_x = 1;
-            addr[2].stride_y = (vx_int32)step;
-            addr[2].scale_x = VX_SCALE_UNITY;
-            addr[2].scale_y = VX_SCALE_UNITY;
-            addr[2].step_x = addr[1].step_x;
-            addr[2].step_y = addr[1].step_y;
-            ptrs[2] = (void*)(data + (h + addr[1].dim_y) * step);
+            addr[2].stride_y = addr[1].stride_y;
+            ptrs[2] = (void*)(data + h * step + addr[1].dim_y * addr[1].stride_y);
             break;
         default:
             vxErr(VX_ERROR_INVALID_PARAMETERS, "Bad image format").check();
         }
         img = vxCreateImageFromHandle(ctx.ctx, imgType, addr, ptrs, VX_MEMORY_TYPE_HOST);
         vxErr::check(img);
+        swapMemory = true;
     }
     ~vxImage()
     {
-        vxErr::check(vxSwapImageHandle(img, NULL, NULL, 1));
+#if VX_VERSION > VX_VERSION_1_0
+        if (swapMemory)
+            vxErr::check(vxSwapImageHandle(img, NULL, NULL, 1));
+#endif
         vxReleaseImage(&img);
     }
+private:
+    bool swapMemory;
 };
 
 struct vxMatrix
@@ -281,7 +338,11 @@ struct vxMatrix
     {
         mtx = vxCreateMatrix(ctx.ctx, VX_Traits<T>::DataType, w, h);
         vxErr::check(mtx);
+#if VX_VERSION > VX_VERSION_1_0
         vxErr::check(vxCopyMatrix(mtx, const_cast<T*>(data), VX_WRITE_ONLY, VX_MEMORY_TYPE_HOST));
+#else
+        vxErr::check(vxWriteMatrix(mtx, const_cast<T*>(data)));
+#endif
     }
     ~vxMatrix()
     {
@@ -297,13 +358,27 @@ struct vxConvolution
     {
         cnv = vxCreateConvolution(ctx.ctx, w, h);
         vxErr::check(cnv);
+#if VX_VERSION > VX_VERSION_1_0
         vxErr::check(vxCopyConvolutionCoefficients(cnv, const_cast<short*>(data), VX_WRITE_ONLY, VX_MEMORY_TYPE_HOST));
+#else
+        vxErr::check(vxWriteConvolutionCoefficients(cnv, const_cast<short*>(data)));
+#endif
     }
     ~vxConvolution()
     {
         vxReleaseConvolution(&cnv);
     }
 };
+
+inline void setConstantBorder(vx_border_t &border, vx_uint8 val)
+{
+    border.mode = VX_BORDER_CONSTANT;
+#if VX_VERSION > VX_VERSION_1_0
+    border.constant_value.U8 = val;
+#else
+    border.constant_value = val;
+#endif
+}
 
 //==================================================================================================
 // real code starts here
@@ -313,6 +388,8 @@ struct vxConvolution
 template <typename T>                                                                                               \
 inline int ovx_hal_##hal_func(const T *a, size_t astep, const T *b, size_t bstep, T *c, size_t cstep, int w, int h) \
 {                                                                                                                   \
+    if(dimTooBig(w) || dimTooBig(h))                                                                                \
+        return CV_HAL_ERROR_NOT_IMPLEMENTED;                                                                        \
     try                                                                                                             \
     {                                                                                                               \
         vxContext * ctx = vxContext::getContext();                                                                  \
@@ -341,13 +418,34 @@ OVX_BINARY_OP(xor, {vxErr::check(vxuXor(ctx->ctx, ia.img, ib.img, ic.img));})
 template <typename T>
 inline int ovx_hal_mul(const T *a, size_t astep, const T *b, size_t bstep, T *c, size_t cstep, int w, int h, double scale)
 {
+    if(dimTooBig(w) || dimTooBig(h))
+        return CV_HAL_ERROR_NOT_IMPLEMENTED;
+#ifdef _MSC_VER
+    const float MAGIC_SCALE = 0x0.01010102;
+#else
+    const float MAGIC_SCALE = 0x1.010102p-8;
+#endif
     try
     {
+        int rounding_policy = VX_ROUND_POLICY_TO_ZERO;
+        float fscale = (float)scale;
+        if (fabs(fscale - MAGIC_SCALE) > FLT_EPSILON)
+        {
+          int exp = 0;
+          double significand = frexp(fscale, &exp);
+          if((significand != 0.5) || (exp > 1) || (exp < -14))
+              return CV_HAL_ERROR_NOT_IMPLEMENTED;
+        }
+        else
+        {
+            fscale = MAGIC_SCALE;
+            rounding_policy = VX_ROUND_POLICY_TO_NEAREST_EVEN;// That's the only rounding that MUST be supported for 1/255 scale
+        }
         vxContext * ctx = vxContext::getContext();
         vxImage ia(*ctx, a, astep, w, h);
         vxImage ib(*ctx, b, bstep, w, h);
         vxImage ic(*ctx, c, cstep, w, h);
-        vxErr::check(vxuMultiply(ctx->ctx, ia.img, ib.img, (float)scale, VX_CONVERT_POLICY_SATURATE, VX_ROUND_POLICY_TO_ZERO, ic.img));
+        vxErr::check(vxuMultiply(ctx->ctx, ia.img, ib.img, fscale, VX_CONVERT_POLICY_SATURATE, rounding_policy, ic.img));
     }
     catch (vxErr & e)
     {
@@ -359,6 +457,8 @@ inline int ovx_hal_mul(const T *a, size_t astep, const T *b, size_t bstep, T *c,
 
 inline int ovx_hal_not(const uchar *a, size_t astep, uchar *c, size_t cstep, int w, int h)
 {
+    if(dimTooBig(w) || dimTooBig(h))
+        return CV_HAL_ERROR_NOT_IMPLEMENTED;
     try
     {
         vxContext * ctx = vxContext::getContext();
@@ -376,6 +476,8 @@ inline int ovx_hal_not(const uchar *a, size_t astep, uchar *c, size_t cstep, int
 
 inline int ovx_hal_merge8u(const uchar **src_data, uchar *dst_data, int len, int cn)
 {
+    if(dimTooBig(len))
+        return CV_HAL_ERROR_NOT_IMPLEMENTED;
     if (cn != 3 && cn != 4)
         return CV_HAL_ERROR_NOT_IMPLEMENTED;
     try
@@ -397,18 +499,10 @@ inline int ovx_hal_merge8u(const uchar **src_data, uchar *dst_data, int len, int
     return CV_HAL_ERROR_OK;
 }
 
-
-#if defined OPENCV_IMGPROC_HAL_INTERFACE_H
-#define CV_HAL_INTER_NEAREST 0
-#define CV_HAL_INTER_LINEAR 1
-#define CV_HAL_INTER_CUBIC 2
-#define CV_HAL_INTER_AREA 3
-#define CV_HAL_INTER_LANCZOS4 4
-#define MORPH_ERODE 0
-#define MORPH_DILATE 1
-
 inline int ovx_hal_resize(int atype, const uchar *a, size_t astep, int aw, int ah, uchar *b, size_t bstep, int bw, int bh, double inv_scale_x, double inv_scale_y, int interpolation)
 {
+    if(dimTooBig(aw) || dimTooBig(ah) || dimTooBig(bw) || dimTooBig(bh))
+        return CV_HAL_ERROR_NOT_IMPLEMENTED;
     try
     {
         vxContext * ctx = vxContext::getContext();
@@ -424,11 +518,15 @@ inline int ovx_hal_resize(int atype, const uchar *a, size_t astep, int aw, int a
 
         int mode;
         if (interpolation == CV_HAL_INTER_LINEAR)
+        {
             mode = VX_INTERPOLATION_BILINEAR;
+            if (inv_scale_x > 1 || inv_scale_y > 1)
+                return CV_HAL_ERROR_NOT_IMPLEMENTED;
+        }
         else if (interpolation == CV_HAL_INTER_AREA)
-            mode = VX_INTERPOLATION_AREA;
+            return CV_HAL_ERROR_NOT_IMPLEMENTED; //mode = VX_INTERPOLATION_AREA;
         else if (interpolation == CV_HAL_INTER_NEAREST)
-            mode = VX_INTERPOLATION_NEAREST_NEIGHBOR;
+            return CV_HAL_ERROR_NOT_IMPLEMENTED; //mode = VX_INTERPOLATION_NEAREST_NEIGHBOR;
         else
             return CV_HAL_ERROR_NOT_IMPLEMENTED;
 
@@ -444,6 +542,8 @@ inline int ovx_hal_resize(int atype, const uchar *a, size_t astep, int aw, int a
 
 inline int ovx_hal_warpAffine(int atype, const uchar *a, size_t astep, int aw, int ah, uchar *b, size_t bstep, int bw, int bh, const double M[6], int interpolation, int borderType, const double borderValue[4])
 {
+    if(dimTooBig(aw) || dimTooBig(ah) || dimTooBig(bw) || dimTooBig(bh))
+        return CV_HAL_ERROR_NOT_IMPLEMENTED;
     try
     {
         vxContext * ctx = vxContext::getContext();
@@ -457,12 +557,10 @@ inline int ovx_hal_warpAffine(int atype, const uchar *a, size_t astep, int aw, i
         switch (borderType)
         {
         case CV_HAL_BORDER_CONSTANT:
-            border.mode = VX_BORDER_CONSTANT;
-            border.constant_value.U8 = (vx_uint8)(borderValue[0]);
+            setConstantBorder(border, (vx_uint8)borderValue[0]);
             break;
         case CV_HAL_BORDER_REPLICATE:
-            border.mode = VX_BORDER_REPLICATE;
-            break;
+            // Neither 1.0 nor 1.1 OpenVX support BORDER_REPLICATE for warpings
         default:
             return CV_HAL_ERROR_NOT_IMPLEMENTED;
         }
@@ -470,8 +568,9 @@ inline int ovx_hal_warpAffine(int atype, const uchar *a, size_t astep, int aw, i
         int mode;
         if (interpolation == CV_HAL_INTER_LINEAR)
             mode = VX_INTERPOLATION_BILINEAR;
-        else if (interpolation == CV_HAL_INTER_AREA)
-            mode = VX_INTERPOLATION_AREA;
+        //AREA interpolation is unsupported
+        //else if (interpolation == CV_HAL_INTER_AREA)
+        //    mode = VX_INTERPOLATION_AREA;
         else if (interpolation == CV_HAL_INTER_NEAREST)
             mode = VX_INTERPOLATION_NEAREST_NEIGHBOR;
         else
@@ -502,6 +601,8 @@ inline int ovx_hal_warpAffine(int atype, const uchar *a, size_t astep, int aw, i
 
 inline int ovx_hal_warpPerspectve(int atype, const uchar *a, size_t astep, int aw, int ah, uchar *b, size_t bstep, int bw, int bh, const double M[9], int interpolation, int borderType, const double borderValue[4])
 {
+    if(dimTooBig(aw) || dimTooBig(ah) || dimTooBig(bw) || dimTooBig(bh))
+        return CV_HAL_ERROR_NOT_IMPLEMENTED;
     try
     {
         vxContext * ctx = vxContext::getContext();
@@ -515,12 +616,10 @@ inline int ovx_hal_warpPerspectve(int atype, const uchar *a, size_t astep, int a
         switch (borderType)
         {
         case CV_HAL_BORDER_CONSTANT:
-            border.mode = VX_BORDER_CONSTANT;
-            border.constant_value.U8 = (vx_uint8)(borderValue[0]);
+            setConstantBorder(border, (vx_uint8)borderValue[0]);
             break;
         case CV_HAL_BORDER_REPLICATE:
-            border.mode = VX_BORDER_REPLICATE;
-            break;
+            // Neither 1.0 nor 1.1 OpenVX support BORDER_REPLICATE for warpings
         default:
             return CV_HAL_ERROR_NOT_IMPLEMENTED;
         }
@@ -528,8 +627,9 @@ inline int ovx_hal_warpPerspectve(int atype, const uchar *a, size_t astep, int a
         int mode;
         if (interpolation == CV_HAL_INTER_LINEAR)
             mode = VX_INTERPOLATION_BILINEAR;
-        else if (interpolation == CV_HAL_INTER_AREA)
-            mode = VX_INTERPOLATION_AREA;
+        //AREA interpolation is unsupported
+        //else if (interpolation == CV_HAL_INTER_AREA)
+        //    mode = VX_INTERPOLATION_AREA;
         else if (interpolation == CV_HAL_INTER_NEAREST)
             mode = VX_INTERPOLATION_NEAREST_NEIGHBOR;
         else
@@ -563,8 +663,8 @@ struct cvhalFilter2D;
 struct FilterCtx
 {
     vxConvolution cnv;
-    vx_border_t border;
     int dst_type;
+    vx_border_t border;
     FilterCtx(vxContext &ctx, const short *data, int w, int h, int _dst_type, vx_border_t & _border) :
         cnv(ctx, data, w, h), dst_type(_dst_type), border(_border) {}
 };
@@ -581,8 +681,7 @@ inline int ovx_hal_filterInit(cvhalFilter2D **filter_context, uchar *kernel_data
     switch (borderType)
     {
     case CV_HAL_BORDER_CONSTANT:
-        border.mode = VX_BORDER_CONSTANT;
-        border.constant_value.U8 = 0;
+        setConstantBorder(border, 0);
         break;
     case CV_HAL_BORDER_REPLICATE:
         border.mode = VX_BORDER_REPLICATE;
@@ -647,6 +746,8 @@ inline int ovx_hal_filterFree(cvhalFilter2D *filter_context)
 
 inline int ovx_hal_filter(cvhalFilter2D *filter_context, uchar *a, size_t astep, uchar *b, size_t bstep, int w, int h, int , int , int , int )
 {
+    if(dimTooBig(w) || dimTooBig(h))
+        return CV_HAL_ERROR_NOT_IMPLEMENTED;
     try
     {
         FilterCtx* cnv = (FilterCtx*)filter_context;
@@ -694,8 +795,7 @@ inline int ovx_hal_sepFilterInit(cvhalFilter2D **filter_context, int src_type, i
     switch (borderType)
     {
     case CV_HAL_BORDER_CONSTANT:
-        border.mode = VX_BORDER_CONSTANT;
-        border.constant_value.U8 = 0;
+        setConstantBorder(border, 0);
         break;
     case CV_HAL_BORDER_REPLICATE:
         border.mode = VX_BORDER_REPLICATE;
@@ -733,6 +833,8 @@ inline int ovx_hal_sepFilterInit(cvhalFilter2D **filter_context, int src_type, i
     return CV_HAL_ERROR_OK;
 }
 
+#if VX_VERSION > VX_VERSION_1_0
+
 struct MorphCtx
 {
     vxMatrix mask;
@@ -755,17 +857,17 @@ inline int ovx_hal_morphInit(cvhalFilter2D **filter_context, int operation, int 
     switch (borderType)
     {
     case CV_HAL_BORDER_CONSTANT:
-        border.mode = VX_BORDER_CONSTANT;
         if (borderValue[0] == DBL_MAX && borderValue[1] == DBL_MAX && borderValue[2] == DBL_MAX && borderValue[3] == DBL_MAX)
         {
             if (operation == MORPH_ERODE)
-                border.constant_value.U8 = UCHAR_MAX;
+                setConstantBorder(border, UCHAR_MAX);
             else
-                border.constant_value.U8 = 0;
+                setConstantBorder(border, 0);
         }
         else
         {
-            border.constant_value.U8 = cv::saturate_cast<uchar>(borderValue[0]);
+            int rounded = (int)round(borderValue[0]);
+            setConstantBorder(border, (vx_uint8)((unsigned)rounded <= UCHAR_MAX ? rounded : rounded > 0 ? UCHAR_MAX : 0));
         }
         break;
     case CV_HAL_BORDER_REPLICATE:
@@ -777,8 +879,13 @@ inline int ovx_hal_morphInit(cvhalFilter2D **filter_context, int operation, int 
 
     vxContext * ctx = vxContext::getContext();
 
+    vx_size maxKernelDim;
+    vxErr::check(vxQueryContext(ctx->ctx, VX_CONTEXT_NONLINEAR_MAX_DIMENSION, &maxKernelDim, sizeof(maxKernelDim)));
+    if ((vx_size)kernel_width > maxKernelDim || (vx_size)kernel_height > maxKernelDim)
+        return CV_HAL_ERROR_NOT_IMPLEMENTED;
+
     std::vector<uchar> kernel_mat;
-    kernel_mat.resize(kernel_width * kernel_height);
+    kernel_mat.reserve(kernel_width * kernel_height);
     switch (CV_MAT_DEPTH(kernel_type))
     {
     case CV_8U:
@@ -786,7 +893,7 @@ inline int ovx_hal_morphInit(cvhalFilter2D **filter_context, int operation, int 
         for (int j = 0; j < kernel_height; ++j)
         {
             uchar * kernel_row = kernel_data + j * kernel_step;
-            for (int i = 0; i < kernel_height; ++i)
+            for (int i = 0; i < kernel_width; ++i)
                 kernel_mat.push_back(kernel_row[i] ? 255 : 0);
         }
         break;
@@ -795,7 +902,7 @@ inline int ovx_hal_morphInit(cvhalFilter2D **filter_context, int operation, int 
         for (int j = 0; j < kernel_height; ++j)
         {
             short * kernel_row = (short*)(kernel_data + j * kernel_step);
-            for (int i = 0; i < kernel_height; ++i)
+            for (int i = 0; i < kernel_width; ++i)
                 kernel_mat.push_back(kernel_row[i] ? 255 : 0);
         }
         break;
@@ -803,7 +910,7 @@ inline int ovx_hal_morphInit(cvhalFilter2D **filter_context, int operation, int 
         for (int j = 0; j < kernel_height; ++j)
         {
             int * kernel_row = (int*)(kernel_data + j * kernel_step);
-            for (int i = 0; i < kernel_height; ++i)
+            for (int i = 0; i < kernel_width; ++i)
                 kernel_mat.push_back(kernel_row[i] ? 255 : 0);
         }
         break;
@@ -811,7 +918,7 @@ inline int ovx_hal_morphInit(cvhalFilter2D **filter_context, int operation, int 
         for (int j = 0; j < kernel_height; ++j)
         {
             float * kernel_row = (float*)(kernel_data + j * kernel_step);
-            for (int i = 0; i < kernel_height; ++i)
+            for (int i = 0; i < kernel_width; ++i)
                 kernel_mat.push_back(kernel_row[i] ? 255 : 0);
         }
         break;
@@ -819,7 +926,7 @@ inline int ovx_hal_morphInit(cvhalFilter2D **filter_context, int operation, int 
         for (int j = 0; j < kernel_height; ++j)
         {
             double * kernel_row = (double*)(kernel_data + j * kernel_step);
-            for (int i = 0; i < kernel_height; ++i)
+            for (int i = 0; i < kernel_width; ++i)
                 kernel_mat.push_back(kernel_row[i] ? 255 : 0);
         }
         break;
@@ -832,6 +939,7 @@ inline int ovx_hal_morphInit(cvhalFilter2D **filter_context, int operation, int 
     {
     case MORPH_ERODE:
         mat = new MorphCtx(*ctx, kernel_mat.data(), kernel_width, kernel_height, VX_NONLINEAR_FILTER_MIN, border);
+        break;
     case MORPH_DILATE:
         mat = new MorphCtx(*ctx, kernel_mat.data(), kernel_width, kernel_height, VX_NONLINEAR_FILTER_MAX, border);
         break;
@@ -860,6 +968,8 @@ inline int ovx_hal_morphFree(cvhalFilter2D *filter_context)
 
 inline int ovx_hal_morph(cvhalFilter2D *filter_context, uchar *a, size_t astep, uchar *b, size_t bstep, int w, int h, int , int , int , int , int , int , int , int )
 {
+    if(dimTooBig(w) || dimTooBig(h))
+        return CV_HAL_ERROR_NOT_IMPLEMENTED;
     try
     {
         MorphCtx* mat = (MorphCtx*)filter_context;
@@ -886,9 +996,16 @@ inline int ovx_hal_morph(cvhalFilter2D *filter_context, uchar *a, size_t astep, 
     return CV_HAL_ERROR_OK;
 }
 
+#endif // 1.0 guard
+
 inline int ovx_hal_cvtBGRtoBGR(const uchar * a, size_t astep, uchar * b, size_t bstep, int w, int h, int depth, int acn, int bcn, bool swapBlue)
 {
+    if(dimTooBig(w) || dimTooBig(h))
+        return CV_HAL_ERROR_NOT_IMPLEMENTED;
     if (depth != CV_8U || swapBlue || acn == bcn || (acn != 3 && acn != 4) || (bcn != 3 && bcn != 4))
+        return CV_HAL_ERROR_NOT_IMPLEMENTED;
+
+    if (w & 1 || h & 1) // It's strange but sample implementation unable to convert odd sized images
         return CV_HAL_ERROR_NOT_IMPLEMENTED;
 
     try
@@ -906,15 +1023,48 @@ inline int ovx_hal_cvtBGRtoBGR(const uchar * a, size_t astep, uchar * b, size_t 
     return CV_HAL_ERROR_OK;
 }
 
+inline int ovx_hal_cvtGraytoBGR(const uchar * a, size_t astep, uchar * b, size_t bstep, int w, int h, int depth, int bcn)
+{
+    if(dimTooBig(w) || dimTooBig(h))
+        return CV_HAL_ERROR_NOT_IMPLEMENTED;
+    if (depth != CV_8U || (bcn != 3 && bcn != 4))
+        return CV_HAL_ERROR_NOT_IMPLEMENTED;
+
+    try
+    {
+        vxContext * ctx = vxContext::getContext();
+        vxImage ia(*ctx, a, astep, w, h);
+        vxImage ib(*ctx, bcn == 3 ? VX_DF_IMAGE_RGB : VX_DF_IMAGE_RGBX, b, bstep, w, h);
+        vxErr::check(vxuChannelCombine(ctx->ctx, ia.img, ia.img, ia.img,
+            bcn == 4 ? vxImage(*ctx, uchar(255), w, h).img : NULL,
+            ib.img));
+    }
+    catch (vxErr & e)
+    {
+        e.print();
+        return CV_HAL_ERROR_UNKNOWN;
+    }
+    return CV_HAL_ERROR_OK;
+}
+
 inline int ovx_hal_cvtTwoPlaneYUVtoBGR(const uchar * a, size_t astep, uchar * b, size_t bstep, int w, int h, int bcn, bool swapBlue, int uIdx)
 {
+    if(dimTooBig(w) || dimTooBig(h))
+        return CV_HAL_ERROR_NOT_IMPLEMENTED;
     if (!swapBlue || (bcn != 3 && bcn != 4))
+        return CV_HAL_ERROR_NOT_IMPLEMENTED;
+
+    if (w & 1 || h & 1) // It's not described in spec but sample implementation unable to convert odd sized images
         return CV_HAL_ERROR_NOT_IMPLEMENTED;
 
     try
     {
         vxContext * ctx = vxContext::getContext();
         vxImage ia(*ctx, uIdx ? VX_DF_IMAGE_NV21 : VX_DF_IMAGE_NV12, a, astep, w, h);
+        vx_channel_range_e cRange;
+        vxErr::check(vxQueryImage(ia.img, VX_IMAGE_RANGE, &cRange, sizeof(cRange)));
+        if (cRange == VX_CHANNEL_RANGE_FULL)
+            return CV_HAL_ERROR_NOT_IMPLEMENTED; // OpenCV store NV12/NV21 as RANGE_RESTRICTED while OpenVX expect RANGE_FULL
         vxImage ib(*ctx, bcn == 3 ? VX_DF_IMAGE_RGB : VX_DF_IMAGE_RGBX, b, bstep, w, h);
         vxErr::check(vxuColorConvert(ctx->ctx, ia.img, ib.img));
     }
@@ -928,13 +1078,22 @@ inline int ovx_hal_cvtTwoPlaneYUVtoBGR(const uchar * a, size_t astep, uchar * b,
 
 inline int ovx_hal_cvtThreePlaneYUVtoBGR(const uchar * a, size_t astep, uchar * b, size_t bstep, int w, int h, int bcn, bool swapBlue, int uIdx)
 {
-    if (!swapBlue || (bcn != 3 && bcn != 4) || uIdx)
+    if(dimTooBig(w) || dimTooBig(h))
+        return CV_HAL_ERROR_NOT_IMPLEMENTED;
+    if (!swapBlue || (bcn != 3 && bcn != 4) || uIdx || (size_t)w / 2 != astep - (size_t)w / 2)
+        return CV_HAL_ERROR_NOT_IMPLEMENTED;
+
+    if (w & 1 || h & 1) // It's not described in spec but sample implementation unable to convert odd sized images
         return CV_HAL_ERROR_NOT_IMPLEMENTED;
 
     try
     {
         vxContext * ctx = vxContext::getContext();
         vxImage ia(*ctx, VX_DF_IMAGE_IYUV, a, astep, w, h);
+        vx_channel_range_e cRange;
+        vxErr::check(vxQueryImage(ia.img, VX_IMAGE_RANGE, &cRange, sizeof(cRange)));
+        if (cRange == VX_CHANNEL_RANGE_FULL)
+            return CV_HAL_ERROR_NOT_IMPLEMENTED; // OpenCV store NV12/NV21 as RANGE_RESTRICTED while OpenVX expect RANGE_FULL
         vxImage ib(*ctx, bcn == 3 ? VX_DF_IMAGE_RGB : VX_DF_IMAGE_RGBX, b, bstep, w, h);
         vxErr::check(vxuColorConvert(ctx->ctx, ia.img, ib.img));
     }
@@ -948,7 +1107,12 @@ inline int ovx_hal_cvtThreePlaneYUVtoBGR(const uchar * a, size_t astep, uchar * 
 
 inline int ovx_hal_cvtBGRtoThreePlaneYUV(const uchar * a, size_t astep, uchar * b, size_t bstep, int w, int h, int acn, bool swapBlue, int uIdx)
 {
-    if (!swapBlue || (acn != 3 && acn != 4) || uIdx)
+    if(dimTooBig(w) || dimTooBig(h))
+        return CV_HAL_ERROR_NOT_IMPLEMENTED;
+    if (!swapBlue || (acn != 3 && acn != 4) || uIdx || (size_t)w / 2 != bstep - (size_t)w / 2)
+        return CV_HAL_ERROR_NOT_IMPLEMENTED;
+
+    if (w & 1 || h & 1) // It's not described in spec but sample implementation unable to convert odd sized images
         return CV_HAL_ERROR_NOT_IMPLEMENTED;
 
     try
@@ -968,13 +1132,22 @@ inline int ovx_hal_cvtBGRtoThreePlaneYUV(const uchar * a, size_t astep, uchar * 
 
 inline int ovx_hal_cvtOnePlaneYUVtoBGR(const uchar * a, size_t astep, uchar * b, size_t bstep, int w, int h, int bcn, bool swapBlue, int uIdx, int ycn)
 {
+    if(dimTooBig(w) || dimTooBig(h))
+        return CV_HAL_ERROR_NOT_IMPLEMENTED;
     if (!swapBlue || (bcn != 3 && bcn != 4) || uIdx)
+        return CV_HAL_ERROR_NOT_IMPLEMENTED;
+
+    if (w & 1) // It's not described in spec but sample implementation unable to convert odd sized images
         return CV_HAL_ERROR_NOT_IMPLEMENTED;
 
     try
     {
         vxContext * ctx = vxContext::getContext();
         vxImage ia(*ctx, ycn ? VX_DF_IMAGE_UYVY : VX_DF_IMAGE_YUYV, a, astep, w, h);
+        vx_channel_range_e cRange;
+        vxErr::check(vxQueryImage(ia.img, VX_IMAGE_RANGE, &cRange, sizeof(cRange)));
+        if (cRange == VX_CHANNEL_RANGE_FULL)
+            return CV_HAL_ERROR_NOT_IMPLEMENTED; // OpenCV store NV12/NV21 as RANGE_RESTRICTED while OpenVX expect RANGE_FULL
         vxImage ib(*ctx, bcn == 3 ? VX_DF_IMAGE_RGB : VX_DF_IMAGE_RGBX, b, bstep, w, h);
         vxErr::check(vxuColorConvert(ctx->ctx, ia.img, ib.img));
     }
@@ -986,7 +1159,31 @@ inline int ovx_hal_cvtOnePlaneYUVtoBGR(const uchar * a, size_t astep, uchar * b,
     return CV_HAL_ERROR_OK;
 }
 
-#endif
+inline int ovx_hal_integral(int depth, int sdepth, int , const uchar * a, size_t astep, uchar * b, size_t bstep, uchar * c, size_t , uchar * d, size_t , int w, int h, int cn)
+{
+    if (depth != CV_8U || sdepth != CV_32S || c != NULL || d != NULL || cn != 1)
+        return CV_HAL_ERROR_NOT_IMPLEMENTED;
+
+    try
+    {
+        vxContext * ctx = vxContext::getContext();
+        vxImage ia(*ctx, a, astep, w, h);
+        vxImage ib(*ctx, (unsigned int *)(b+bstep+sizeof(unsigned int)), bstep, w, h);
+        vxErr::check(vxuIntegralImage(ctx->ctx, ia.img, ib.img));
+        memset(b, 0, (w+1)*sizeof(unsigned int));
+        b += bstep;
+        for (int i = 0; i < h; i++, b += bstep)
+        {
+            *((unsigned int*)b) = 0;
+        }
+    }
+    catch (vxErr & e)
+    {
+        e.print();
+        return CV_HAL_ERROR_UNKNOWN;
+    }
+    return CV_HAL_ERROR_OK;
+}
 
 //==================================================================================================
 // functions redefinition
@@ -1023,14 +1220,15 @@ inline int ovx_hal_cvtOnePlaneYUVtoBGR(const uchar * a, size_t astep, uchar * b,
 #undef cv_hal_merge8u
 #define cv_hal_merge8u ovx_hal_merge8u
 
-#if defined OPENCV_IMGPROC_HAL_INTERFACE_H
+//#undef cv_hal_resize
+//#define cv_hal_resize ovx_hal_resize
 
-#undef cv_hal_resize
-#define cv_hal_resize ovx_hal_resize
-#undef cv_hal_warpAffine
-#define cv_hal_warpAffine ovx_hal_warpAffine
-#undef cv_hal_warpPerspective
-#define cv_hal_warpPerspective ovx_hal_warpPerspectve
+//OpenVX warps use round to zero policy at least in sample implementation
+//while OpenCV require round to nearest
+//#undef cv_hal_warpAffine
+//#define cv_hal_warpAffine ovx_hal_warpAffine
+//#undef cv_hal_warpPerspective
+//#define cv_hal_warpPerspective ovx_hal_warpPerspectve
 
 #undef cv_hal_filterInit
 #define cv_hal_filterInit ovx_hal_filterInit
@@ -1046,6 +1244,8 @@ inline int ovx_hal_cvtOnePlaneYUVtoBGR(const uchar * a, size_t astep, uchar * b,
 #undef cv_hal_sepFilterFree
 #define cv_hal_sepFilterFree ovx_hal_filterFree
 
+#if VX_VERSION > VX_VERSION_1_0
+
 #undef cv_hal_morphInit
 #define cv_hal_morphInit ovx_hal_morphInit
 #undef cv_hal_morph
@@ -1053,8 +1253,12 @@ inline int ovx_hal_cvtOnePlaneYUVtoBGR(const uchar * a, size_t astep, uchar * b,
 #undef cv_hal_morphFree
 #define cv_hal_morphFree ovx_hal_morphFree
 
+#endif // 1.0 guard
+
 #undef cv_hal_cvtBGRtoBGR
 #define cv_hal_cvtBGRtoBGR ovx_hal_cvtBGRtoBGR
+#undef cv_hal_cvtGraytoBGR
+#define cv_hal_cvtGraytoBGR ovx_hal_cvtGraytoBGR
 #undef cv_hal_cvtTwoPlaneYUVtoBGR
 #define cv_hal_cvtTwoPlaneYUVtoBGR ovx_hal_cvtTwoPlaneYUVtoBGR
 #undef cv_hal_cvtThreePlaneYUVtoBGR
@@ -1063,7 +1267,7 @@ inline int ovx_hal_cvtOnePlaneYUVtoBGR(const uchar * a, size_t astep, uchar * b,
 #define cv_hal_cvtBGRtoThreePlaneYUV ovx_hal_cvtBGRtoThreePlaneYUV
 #undef cv_hal_cvtOnePlaneYUVtoBGR
 #define cv_hal_cvtOnePlaneYUVtoBGR ovx_hal_cvtOnePlaneYUVtoBGR
-
-#endif
+#undef cv_hal_integral
+#define cv_hal_integral ovx_hal_integral
 
 #endif

@@ -40,8 +40,8 @@
 //
 //M*/
 
-#ifndef __OPENCV_VIDEOIO_HPP__
-#define __OPENCV_VIDEOIO_HPP__
+#ifndef OPENCV_VIDEOIO_HPP
+#define OPENCV_VIDEOIO_HPP
 
 #include "opencv2/core.hpp"
 
@@ -113,7 +113,8 @@ enum VideoCaptureAPIs {
        CAP_GPHOTO2      = 1700,         //!< gPhoto2 connection
        CAP_GSTREAMER    = 1800,         //!< GStreamer
        CAP_FFMPEG       = 1900,         //!< Open and record video file or stream using the FFMPEG library
-       CAP_IMAGES       = 2000          //!< OpenCV Image Sequence (e.g. img_%02d.jpg)
+       CAP_IMAGES       = 2000,         //!< OpenCV Image Sequence (e.g. img_%02d.jpg)
+       CAP_ARAVIS       = 2100          //!< Aravis SDK
      };
 
 /** @brief %VideoCapture generic properties identifier.
@@ -555,6 +556,20 @@ enum { CAP_PROP_GPHOTO2_PREVIEW           = 17001, //!< Capture only preview fro
 
 //! @} gPhoto2
 
+
+/** @name Images backend
+    @{
+*/
+
+/** @brief Images backend properties
+
+*/
+enum { CAP_PROP_IMAGES_BASE = 18000,
+       CAP_PROP_IMAGES_LAST = 19000 // excluding
+     };
+
+//! @} Images
+
 //! @} videoio_flags_others
 
 
@@ -648,6 +663,16 @@ public:
     The method first calls VideoCapture::release to close the already opened file or camera.
     */
     CV_WRAP virtual bool open(int index);
+
+   /** @brief  Open a camera for video capturing
+
+    @overload
+
+    This is an overloaded member function, provided for convenience. It differs from the above function only in what argument(s) it accepts.
+    Parameters are similar as the constructor VideoCapture(int index),except it takes an additional argument apiPreference.
+    @return open(cameraNum + apiPreference).
+    */
+    CV_WRAP bool open(int cameraNum, int apiPreference);
 
     /** @brief Returns true if video capturing has been initialized already.
 
@@ -907,4 +932,4 @@ template<> CV_EXPORTS void DefaultDeleter<CvVideoWriter>::operator ()(CvVideoWri
 
 } // cv
 
-#endif //__OPENCV_VIDEOIO_HPP__
+#endif //OPENCV_VIDEOIO_HPP

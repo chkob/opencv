@@ -41,8 +41,8 @@
 //
 //M*/
 
-#ifndef __OPENCV_CORE_MAT_HPP__
-#define __OPENCV_CORE_MAT_HPP__
+#ifndef OPENCV_CORE_MAT_HPP
+#define OPENCV_CORE_MAT_HPP
 
 #ifndef __cplusplus
 #  error mat.hpp header must be compiled as C++
@@ -1046,9 +1046,8 @@ public:
 
     /** @brief creates a diagonal matrix
 
-    The method makes a new header for the specified matrix diagonal. The new matrix is represented as a
-    single-column matrix. Similarly to Mat::row and Mat::col, this is an O(1) operation.
-    @param d Single-column matrix that forms a diagonal matrix
+    The method creates a square diagonal matrix from specified main diagonal.
+    @param d One-dimensional matrix that represents the main diagonal.
      */
     static Mat diag(const Mat& d);
 
@@ -3459,4 +3458,4 @@ CV_EXPORTS MatExpr abs(const MatExpr& e);
 
 #include "opencv2/core/mat.inl.hpp"
 
-#endif // __OPENCV_CORE_MAT_HPP__
+#endif // OPENCV_CORE_MAT_HPP
