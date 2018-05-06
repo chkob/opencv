@@ -40,9 +40,9 @@
 //M*/
 
 #include "test_precomp.hpp"
+#include <opencv2/highgui.hpp>
 
-using namespace cv;
-using namespace std;
+namespace opencv_test { namespace {
 
 class CV_FindContourTest : public cvtest::BaseTest
 {
@@ -410,47 +410,6 @@ _exit_:
 
 TEST(Imgproc_FindContours, accuracy) { CV_FindContourTest test; test.safe_run(); }
 
-TEST(Core_Drawing, _914)
-{
-    const int rows = 256;
-    const int cols = 256;
-
-    Mat img(rows, cols, CV_8UC1, Scalar(255));
-
-    line(img, Point(0, 10), Point(255, 10), Scalar(0), 2, 4);
-    line(img, Point(-5, 20), Point(260, 20), Scalar(0), 2, 4);
-    line(img, Point(10, 0), Point(10, 255), Scalar(0), 2, 4);
-
-    double x0 = 0.0/pow(2.0, -2.0);
-    double x1 = 255.0/pow(2.0, -2.0);
-    double y = 30.5/pow(2.0, -2.0);
-
-    line(img, Point(int(x0), int(y)), Point(int(x1), int(y)), Scalar(0), 2, 4, 2);
-
-    int pixelsDrawn = rows*cols - countNonZero(img);
-    ASSERT_EQ( (3*rows + cols)*3 - 3*9, pixelsDrawn);
-}
-
-TEST(Core_Drawing, polylines_empty)
-{
-    Mat img(100, 100, CV_8UC1, Scalar(0));
-    vector<Point> pts; // empty
-    polylines(img, pts, false, Scalar(255));
-    int cnt = countNonZero(img);
-    ASSERT_EQ(cnt, 0);
-}
-
-TEST(Core_Drawing, polylines)
-{
-    Mat img(100, 100, CV_8UC1, Scalar(0));
-    vector<Point> pts;
-    pts.push_back(Point(0, 0));
-    pts.push_back(Point(20, 0));
-    polylines(img, pts, false, Scalar(255));
-    int cnt = countNonZero(img);
-    ASSERT_EQ(cnt, 21);
-}
-
 //rotate/flip a quadrant appropriately
 static void rot(int n, int *x, int *y, int rx, int ry)
 {
@@ -512,7 +471,7 @@ TEST(Imgproc_FindContours, hilbert)
 TEST(Imgproc_FindContours, border)
 {
     Mat img;
-    copyMakeBorder(Mat::zeros(8, 10, CV_8U), img, 1, 1, 1, 1, BORDER_CONSTANT, Scalar(1));
+    cv::copyMakeBorder(Mat::zeros(8, 10, CV_8U), img, 1, 1, 1, 1, BORDER_CONSTANT, Scalar(1));
 
     std::vector<std::vector<cv::Point> > contours;
     findContours(img, contours, RETR_LIST, CHAIN_APPROX_NONE);
@@ -520,10 +479,25 @@ TEST(Imgproc_FindContours, border)
     Mat img_draw_contours = Mat::zeros(img.size(), CV_8U);
     for (size_t cpt = 0; cpt < contours.size(); cpt++)
     {
-      drawContours(img_draw_contours, contours, static_cast<int>(cpt), cv::Scalar(255));
+      drawContours(img_draw_contours, contours, static_cast<int>(cpt), cv::Scalar(1));
     }
 
-    ASSERT_TRUE(norm(img - img_draw_contours, NORM_INF) == 0.0);
+    ASSERT_EQ(0, cvtest::norm(img, img_draw_contours, NORM_INF));
 }
 
+TEST(Imgproc_PointPolygonTest, regression_10222)
+{
+    vector<Point> contour;
+    contour.push_back(Point(0, 0));
+    contour.push_back(Point(0, 100000));
+    contour.push_back(Point(100000, 100000));
+    contour.push_back(Point(100000, 50000));
+    contour.push_back(Point(100000, 0));
+
+    const Point2f point(40000, 40000);
+    const double result = cv::pointPolygonTest(contour, point, false);
+    EXPECT_GT(result, 0) << "Desired result: point is inside polygon - actual result: point is not inside polygon";
+}
+
+}} // namespace
 /* End of file. */

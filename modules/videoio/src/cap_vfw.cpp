@@ -99,11 +99,11 @@ public:
     virtual bool open( const char* filename );
     virtual void close();
 
-    virtual double getProperty(int) const;
-    virtual bool setProperty(int, double);
-    virtual bool grabFrame();
-    virtual IplImage* retrieveFrame(int);
-    virtual int getCaptureDomain() { return CV_CAP_VFW; } // Return the type of the capture object: CV_CAP_VFW, etc...
+    virtual double getProperty(int) const CV_OVERRIDE;
+    virtual bool setProperty(int, double) CV_OVERRIDE;
+    virtual bool grabFrame() CV_OVERRIDE;
+    virtual IplImage* retrieveFrame(int) CV_OVERRIDE;
+    virtual int getCaptureDomain() CV_OVERRIDE { return CV_CAP_VFW; } // Return the type of the capture object: CV_CAP_VFW, etc...
 
 protected:
     void init();
@@ -312,8 +312,16 @@ CvCapture* cvCreateFileCapture_VFW (const char* filename)
 class CvCaptureCAM_VFW : public CvCapture
 {
 public:
-    CvCaptureCAM_VFW() { init(); }
-    virtual ~CvCaptureCAM_VFW() { close(); }
+    CvCaptureCAM_VFW()
+    {
+        CoInitialize(NULL);
+        init();
+    }
+    virtual ~CvCaptureCAM_VFW()
+    {
+        close();
+        CoUninitialize();
+    }
 
     virtual bool open( int index );
     virtual void close();
@@ -673,8 +681,16 @@ CvCapture* cvCreateCameraCapture_VFW( int index )
 class CvVideoWriter_VFW : public CvVideoWriter
 {
 public:
-    CvVideoWriter_VFW() { init(); }
-    virtual ~CvVideoWriter_VFW() { close(); }
+    CvVideoWriter_VFW()
+    {
+        CoInitialize(NULL);
+        init();
+    }
+    virtual ~CvVideoWriter_VFW()
+    {
+        close();
+        CoUninitialize();
+    }
 
     virtual bool open( const char* filename, int fourcc,
                        double fps, CvSize frameSize, bool isColor );
